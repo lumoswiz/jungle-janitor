@@ -66,6 +66,20 @@ def _save_positions_db(data: Dict):
     click.echo(f"Saved positions DB with {len(data)} entries")
 
 
+def _update_user_data(address, log, context):
+    if address in context.state.borrowers:
+        health_factor = POOL.getUserAccountData(address)
+        if health_factor == 2**256 - 1:
+            del context.state.borrowers[address]
+            del context.state.positions[address]
+        else:
+            context.state.borrowers[address].update(
+                {"health_factor": health_factor, "last_hf_update": log.block_number}
+            )
+        _save_borrowers_db(context.state.borrowers)
+        _save_positions_db(context.state.positions)
+
+
 @bot.on_worker_startup()
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()
@@ -108,3 +122,21 @@ def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]
         "health_factor": health_factor,
         "block_number": log.block_number,
     }
+
+
+@bot.on_(POOL.Supply)
+def handle_supply(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
+    _update_user_data(log.onBehalfOf, log, context)
+    return {"borrower": log.onBehalfOf, "block_number": log.block_number}
+
+
+@bot.on_(POOL.Repay)
+def handle_repay(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
+    _update_user_data(log.user, log, context)
+    return {"borrower": log.user, "block_number": log.block_number}
+
+
+@bot.on_(POOL.Withdraw)
+def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
+    _update_user_data(log.user, log, context)
+    return {"borrower": log.user, "block_number": log.block_number}

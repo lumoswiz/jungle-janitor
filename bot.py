@@ -4,8 +4,10 @@ from typing import Annotated, Dict
 import click
 import numpy as np
 import pandas as pd
-from ape import Contract
+from ape import Contract, chain
+from ape.api import BlockAPI
 from ape.types import ContractLog
+from ape_ethereum import multicall
 from silverback import SilverbackBot
 from taskiq import Context, TaskiqDepends, TaskiqState
 
@@ -15,6 +17,7 @@ bot = SilverbackBot()
 # Contracts
 POOL_ADDRESSES_PROVIDER = Contract(os.environ["POOL_ADDRESSES_PROVIDER"])
 POOL = Contract(POOL_ADDRESSES_PROVIDER.getPool())
+UI_POOL_DATA_PROVIDER_V3 = Contract(os.environ["UI_POOL_DATA_PROVIDER_V3"])
 
 # File paths for persistent storage
 BORROWERS_FILEPATH = os.environ.get("BORROWERS_FILEPATH", ".db/borrowers.csv")
@@ -140,3 +143,55 @@ def handle_repay(log: ContractLog, context: Annotated[Context, TaskiqDepends()])
 def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     _update_user_data(log.user, log, context)
     return {"borrower": log.user, "block_number": log.block_number}
+
+
+@bot.on_(chain.blocks)
+def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
+    borrowers_to_check = [
+        address
+        for address, data in context.state.positions.items()
+        if data["last_positions_update"] == 0
+    ]
+
+    if borrowers_to_check:
+        call = multicall.Call()
+        for borrower in borrowers_to_check:
+            args = (POOL_ADDRESSES_PROVIDER, borrower)
+            call.add(UI_POOL_DATA_PROVIDER_V3.getUserReservesData, *args)
+
+        results_with_borrowers = [
+            (borrower, result)
+            for borrower, result in zip(borrowers_to_check, call())
+            if result is not None
+        ]
+
+        for borrower, (reserves_data, _) in results_with_borrowers:
+            collateral_assets = [
+                reserve.underlyingAsset
+                for reserve in reserves_data
+                if reserve.scaledATokenBalance > 0
+            ]
+
+            debt_assets = [
+                reserve.underlyingAsset
+                for reserve in reserves_data
+                if reserve.scaledVariableDebt > 0
+            ]
+
+            context.state.positions[borrower].update(
+                {
+                    "collateral_assets": collateral_assets,
+                    "debt_assets": debt_assets,
+                    "last_positions_update": block.number,
+                }
+            )
+
+        _save_positions_db(context.state.positions)
+
+        click.echo(f"Updated positions for {len(results_with_borrowers)} borrowers")
+
+    return {
+        "message": "Block execution completed",
+        "borrowers_checked": len(borrowers_to_check) if borrowers_to_check else 0,
+        "block_number": block.number,
+    }

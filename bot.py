@@ -118,6 +118,14 @@ def _update_borrower_positions(borrower: str, reserves_data) -> dict:
     }
 
 
+def _update_block_state(block_number: int, context: Context):
+    if not hasattr(context.state, "block_state"):
+        context.state.block_state = _load_block_db()
+
+    context.state.block_state = {"last_processed_block": block_number}
+    _save_block_db(context.state.block_state)
+
+
 def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int, list]:
     borrowers_to_check = [
         address
@@ -196,6 +204,7 @@ def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]
 
     _save_borrowers_db(context.state.borrowers)
     _save_positions_db(context.state.positions)
+    _update_block_state(log.block_number, context)
 
     return {
         "borrower": log.onBehalfOf,
@@ -207,18 +216,21 @@ def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]
 @bot.on_(POOL.Supply)
 def handle_supply(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     _update_user_data(log.onBehalfOf, log, context)
+    _update_block_state(log.block_number, context)
     return {"borrower": log.onBehalfOf, "block_number": log.block_number}
 
 
 @bot.on_(POOL.Repay)
 def handle_repay(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     _update_user_data(log.user, log, context)
+    _update_block_state(log.block_number, context)
     return {"borrower": log.user, "block_number": log.block_number}
 
 
 @bot.on_(POOL.Withdraw)
 def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     _update_user_data(log.user, log, context)
+    _update_block_state(log.block_number, context)
     return {"borrower": log.user, "block_number": log.block_number}
 
 

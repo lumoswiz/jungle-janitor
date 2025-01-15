@@ -18,6 +18,7 @@ POOL = Contract(POOL_ADDRESSES_PROVIDER.getPool())
 
 # File paths for persistent storage
 BORROWERS_FILEPATH = os.environ.get("BORROWERS_FILEPATH", ".db/borrowers.csv")
+POSITIONS_FILEPATH = os.environ.get("POSITIONS_FILEPATH", ".db/positions.csv")
 
 
 def _load_borrowers_db() -> pd.DataFrame:
@@ -36,6 +37,27 @@ def _save_borrowers_db(db: pd.DataFrame):
     os.makedirs(os.path.dirname(BORROWERS_FILEPATH), exist_ok=True)
     db.to_csv(BORROWERS_FILEPATH)
     click.echo(f"Saved borrowers DB with {len(db)} entries")
+
+
+def _load_positions_db() -> pd.DataFrame:
+    """Loads positions database from persistent storage."""
+    dtype = {
+        "debt_assets": object,
+        "collateral_assets": object,
+        "last_positions_update": np.int64,
+    }
+    return (
+        pd.read_csv(POSITIONS_FILEPATH, index_col="address", dtype=dtype)
+        if os.path.exists(POSITIONS_FILEPATH)
+        else pd.DataFrame(columns=["debt_assets", "collateral_assets", "last_positions_update"])
+    )
+
+
+def _save_positions_db(db: pd.DataFrame):
+    """Saves positions database to persistent storage."""
+    os.makedirs(os.path.dirname(POSITIONS_FILEPATH), exist_ok=True)
+    db.to_csv(POSITIONS_FILEPATH)
+    click.echo(f"Saved positions DB with {len(db)} entries")
 
 
 @bot.on_worker_startup()

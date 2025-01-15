@@ -22,12 +22,16 @@ UI_POOL_DATA_PROVIDER_V3 = Contract(os.environ["UI_POOL_DATA_PROVIDER_V3"])
 # File paths for persistent storage
 BORROWERS_FILEPATH = os.environ.get("BORROWERS_FILEPATH", ".db/borrowers.csv")
 POSITIONS_FILEPATH = os.environ.get("POSITIONS_FILEPATH", ".db/positions.csv")
+BLOCK_FILEPATH = os.environ.get("BLOCK_FILEPATH", ".db/block.csv")
+
+# Environment variables
+START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
 
 
 def _load_borrowers_db() -> Dict:
     dtype = {
         "borrower_address": str,
-        "health_factor": np.int64,
+        "health_factor": object,
         "last_hf_update": np.int64,
     }
     df = (
@@ -53,6 +57,15 @@ def _load_positions_db() -> Dict:
     return df.set_index("borrower_address").to_dict("index")
 
 
+def _load_block_db() -> Dict:
+    df = (
+        pd.read_csv(BLOCK_FILEPATH)
+        if os.path.exists(BLOCK_FILEPATH)
+        else pd.DataFrame({"last_processed_block": [START_BLOCK]})
+    )
+    return {"last_processed_block": df["last_processed_block"].iloc[0]}
+
+
 def _save_borrowers_db(data: Dict):
     os.makedirs(os.path.dirname(BORROWERS_FILEPATH), exist_ok=True)
     df = pd.DataFrame.from_dict(data, orient="index").reset_index()
@@ -67,6 +80,13 @@ def _save_positions_db(data: Dict):
     df.columns = ["borrower_address", "debt_assets", "collateral_assets", "last_positions_update"]
     df.to_csv(POSITIONS_FILEPATH, index=False)
     click.echo(f"Saved positions DB with {len(data)} entries")
+
+
+def _save_block_db(data: Dict):
+    os.makedirs(os.path.dirname(BLOCK_FILEPATH), exist_ok=True)
+    df = pd.DataFrame([data])
+    df.to_csv(BLOCK_FILEPATH, index=False)
+    click.echo(f"Saved block state: {data}")
 
 
 def _update_user_data(address, log, context):
@@ -139,14 +159,19 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()
     state.positions = _load_positions_db()
+    state.block_state = _load_block_db()
 
     click.echo(
-        f"Worker started with {len(state.borrowers)} borrowers and {len(state.positions)} positions"
+        f"Worker started:\n"
+        f"  Borrowers: {len(state.borrowers)}\n"
+        f"  Positions: {len(state.positions)}\n"
+        f"  Last block: {state.block_state['last_processed_block']}"
     )
     return {
         "message": "Worker started",
         "borrowers_count": len(state.borrowers),
         "positions_count": len(state.positions),
+        "last_processed_block": state.block_state["last_processed_block"],
     }
 
 

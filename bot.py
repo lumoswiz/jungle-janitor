@@ -1,12 +1,15 @@
 import os
+from typing import Annotated
 
 import click
 import numpy as np
 import pandas as pd
 from ape import Contract
+from ape.types import ContractLog
 from silverback import SilverbackBot
+from taskiq import Context, TaskiqDepends, TaskiqState
 
-# Initialize app
+# Initialize bot
 bot = SilverbackBot()
 
 # Contracts
@@ -18,7 +21,6 @@ BORROWERS_FILEPATH = os.environ.get("BORROWERS_FILEPATH", ".db/borrowers.csv")
 
 
 def _load_borrowers_db() -> pd.DataFrame:
-    """Loads borrowers database from persistent storage."""
     dtype = {
         "health_factor": np.int64,
         "last_hf_update": np.int64,
@@ -31,7 +33,38 @@ def _load_borrowers_db() -> pd.DataFrame:
 
 
 def _save_borrowers_db(db: pd.DataFrame):
-    """Saves borrowers database to persistent storage."""
     os.makedirs(os.path.dirname(BORROWERS_FILEPATH), exist_ok=True)
     db.to_csv(BORROWERS_FILEPATH)
     click.echo(f"Saved borrowers DB with {len(db)} entries")
+
+
+@bot.on_worker_startup()
+def worker_startup(state: TaskiqState):
+    state.borrowers_db = _load_borrowers_db()
+
+    click.echo(f"Worker started with {len(state.borrowers_db)} borrowers in database")
+    return {"message": "Worker started", "borrowers_count": len(state.borrowers_db)}
+
+
+@bot.on_(POOL.Borrow)
+def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
+    *_, health_factor = POOL.getUserAccountData(log.onBehalfOf)
+
+    if log.onBehalfOf in context.state.borrowers_db.index:
+        context.state.borrowers_db.loc[log.onBehalfOf] = {
+            "health_factor": health_factor,
+            "last_hf_update": log.block_number,
+        }
+    else:
+        context.state.borrowers_db.loc[log.onBehalfOf] = {
+            "health_factor": health_factor,
+            "last_hf_update": log.block_number,
+        }
+
+    _save_borrowers_db(context.state.borrowers_db)
+
+    return {
+        "borrower": log.onBehalfOf,
+        "health_factor": health_factor,
+        "block_number": log.block_number,
+    }

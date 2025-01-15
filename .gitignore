@@ -17,3 +17,6 @@ wheels/
 
 # Silverback
 .silverback-sessions/
+
+# Local storage
+.db/

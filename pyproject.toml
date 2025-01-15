@@ -19,5 +19,3 @@ select = [
     "F", # pyflakes
     "I", # isort
 ]
-
-extend-select = ["I"]

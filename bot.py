@@ -179,6 +179,17 @@ def update_borrower_health_factor(
     borrowers[borrower].update({"health_factor": health_factor, "last_hf_update": block_number})
 
 
+def _get_unique_borrowers_from_logs(
+    start_block: int,
+    stop_block: int,
+) -> dict:
+    logs = POOL.Borrow.range(start_or_stop=start_block, stop=stop_block)
+    borrowers = {log.onBehalfOf: log.block_number for log in logs}
+
+    click.echo(f"Found {len(borrowers)} unique borrowers from historical events")
+    return borrowers
+
+
 @bot.on_worker_startup()
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()

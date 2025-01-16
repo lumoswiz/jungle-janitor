@@ -1,7 +1,6 @@
 import os
 from typing import Annotated, Dict
 
-import click
 import numpy as np
 import pandas as pd
 from ape import Contract, chain
@@ -74,7 +73,6 @@ def _save_borrowers_db(data: Dict):
     df = pd.DataFrame.from_dict(data, orient="index").reset_index()
     df.columns = ["borrower_address", "health_factor", "last_hf_update"]
     df.to_csv(BORROWERS_FILEPATH, index=False)
-    click.echo(f"Saved borrowers DB with {len(data)} entries")
 
 
 def _save_positions_db(data: Dict):
@@ -82,14 +80,12 @@ def _save_positions_db(data: Dict):
     df = pd.DataFrame.from_dict(data, orient="index").reset_index()
     df.columns = ["borrower_address", "debt_assets", "collateral_assets", "last_positions_update"]
     df.to_csv(POSITIONS_FILEPATH, index=False)
-    click.echo(f"Saved positions DB with {len(data)} entries")
 
 
 def _save_block_db(data: Dict):
     os.makedirs(os.path.dirname(BLOCK_FILEPATH), exist_ok=True)
     df = pd.DataFrame([data])
     df.to_csv(BLOCK_FILEPATH, index=False)
-    click.echo(f"Saved block state: {data}")
 
 
 def _update_user_data(address, log, context):
@@ -161,7 +157,6 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
 
     if results_with_borrowers:
         _save_positions_db(context.state.positions)
-        click.echo(f"Updated positions for {len(results_with_borrowers)} borrowers")
 
     return len(results_with_borrowers), borrowers_to_check
 
@@ -185,8 +180,6 @@ def _get_unique_borrowers_from_logs(
 ) -> dict:
     logs = POOL.Borrow.range(start_or_stop=start_block, stop=stop_block)
     borrowers = {log.onBehalfOf: log.block_number for log in logs}
-
-    click.echo(f"Found {len(borrowers)} unique borrowers from historical events")
     return borrowers
 
 
@@ -206,8 +199,6 @@ def _get_borrowers_health_factors(borrowers: dict) -> list:
         for borrower, result in zip(borrowers, call())
         if result is not None and result[-1] != MAX_UINT
     ]
-
-    click.echo(f"Retrieved health factors for {len(results_with_borrowers)} active borrowers")
     return results_with_borrowers
 
 
@@ -231,16 +222,12 @@ def _update_borrowers_from_history(results: list) -> None:
     if results:
         _save_borrowers_db(borrowers)
         _save_positions_db(positions)
-        click.echo(
-            click.echo(f"Updated DB: {len(results)} total, {len(borrowers_to_check)} to check")
-        )
 
 
 def _process_historical_events(
     start_block: int,
     stop_block: int,
 ) -> None:
-    click.echo(f"Processing historical events from block {start_block} to {stop_block}")
     borrowers = _get_unique_borrowers_from_logs(start_block, stop_block)
     results = _get_borrowers_health_factors(borrowers)
     _update_borrowers_from_history(results)
@@ -263,13 +250,6 @@ def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()
     state.positions = _load_positions_db()
     state.block_state = _load_block_db()
-
-    click.echo(
-        f"Worker started:\n"
-        f"  Borrowers: {len(state.borrowers)}\n"
-        f"  Positions: {len(state.positions)}\n"
-        f"  Last block: {state.block_state['last_processed_block']}"
-    )
     return {
         "message": "Worker started",
         "borrowers_count": len(state.borrowers),

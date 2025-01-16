@@ -211,6 +211,31 @@ def _get_borrowers_health_factors(borrowers: dict) -> list:
     return results_with_borrowers
 
 
+def _update_borrowers_from_history(results: list) -> None:
+    borrowers = _load_borrowers_db()
+    positions = _load_positions_db()
+
+    borrowers_to_check = []
+    for borrower, data in results:
+        if borrower in borrowers:
+            borrowers[borrower].update(data)
+        else:
+            borrowers[borrower] = data
+            positions[borrower] = {
+                "debt_assets": "",
+                "collateral_assets": "",
+                "last_positions_update": 0,
+            }
+            borrowers_to_check.append(borrower)
+
+    if results:
+        _save_borrowers_db(borrowers)
+        _save_positions_db(positions)
+        click.echo(
+            click.echo(f"Updated DB: {len(results)} total, {len(borrowers_to_check)} to check")
+        )
+
+
 @bot.on_worker_startup()
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()

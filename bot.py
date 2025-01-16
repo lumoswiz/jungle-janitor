@@ -8,7 +8,7 @@ from ape import Contract, chain
 from ape.api import BlockAPI
 from ape.types import ContractLog
 from ape_ethereum import multicall
-from silverback import SilverbackBot
+from silverback import BotState, SilverbackBot
 from taskiq import Context, TaskiqDepends, TaskiqState
 
 # Initialize bot
@@ -26,6 +26,9 @@ BLOCK_FILEPATH = os.environ.get("BLOCK_FILEPATH", ".db/block.csv")
 
 # Environment variables
 START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
+
+# Constants
+MAX_UINT = 2**256 - 1
 
 
 def _load_borrowers_db() -> Dict:
@@ -163,6 +166,98 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
     return len(results_with_borrowers), borrowers_to_check
 
 
+def initialize_new_borrower(
+    borrower: str, health_factor: int, block_number: int, borrowers: Dict, positions: Dict
+) -> None:
+    borrowers[borrower] = {"health_factor": health_factor, "last_hf_update": block_number}
+    positions[borrower] = {"debt_assets": "", "collateral_assets": "", "last_positions_update": 0}
+
+
+def update_borrower_health_factor(
+    borrower: str, health_factor: int, block_number: int, borrowers: Dict
+) -> None:
+    borrowers[borrower].update({"health_factor": health_factor, "last_hf_update": block_number})
+
+
+def _get_unique_borrowers_from_logs(
+    start_block: int,
+    stop_block: int,
+) -> dict:
+    logs = POOL.Borrow.range(start_or_stop=start_block, stop=stop_block)
+    borrowers = {log.onBehalfOf: log.block_number for log in logs}
+
+    click.echo(f"Found {len(borrowers)} unique borrowers from historical events")
+    return borrowers
+
+
+def _get_borrowers_health_factors(borrowers: dict) -> list:
+    call = multicall.Call()
+    for borrower in borrowers:
+        call.add(POOL.getUserAccountData, borrower)
+
+    results_with_borrowers = [
+        (
+            borrower,
+            {
+                "health_factor": result[-1],
+                "last_hf_update": borrowers[borrower],
+            },
+        )
+        for borrower, result in zip(borrowers, call())
+        if result is not None and result[-1] != MAX_UINT
+    ]
+
+    click.echo(f"Retrieved health factors for {len(results_with_borrowers)} active borrowers")
+    return results_with_borrowers
+
+
+def _update_borrowers_from_history(results: list) -> None:
+    borrowers = _load_borrowers_db()
+    positions = _load_positions_db()
+
+    borrowers_to_check = []
+    for borrower, data in results:
+        if borrower in borrowers:
+            borrowers[borrower].update(data)
+        else:
+            borrowers[borrower] = data
+            positions[borrower] = {
+                "debt_assets": "",
+                "collateral_assets": "",
+                "last_positions_update": 0,
+            }
+            borrowers_to_check.append(borrower)
+
+    if results:
+        _save_borrowers_db(borrowers)
+        _save_positions_db(positions)
+        click.echo(
+            click.echo(f"Updated DB: {len(results)} total, {len(borrowers_to_check)} to check")
+        )
+
+
+def _process_historical_events(
+    start_block: int,
+    stop_block: int,
+) -> None:
+    click.echo(f"Processing historical events from block {start_block} to {stop_block}")
+    borrowers = _get_unique_borrowers_from_logs(start_block, stop_block)
+    results = _get_borrowers_health_factors(borrowers)
+    _update_borrowers_from_history(results)
+
+
+@bot.on_startup()
+def bot_startup(startup_state: BotState):
+    last_block = _load_block_db()["last_processed_block"]
+    current_block = chain.blocks.head.number
+    _process_historical_events(last_block, current_block)
+    return {
+        "message": "Historical processing complete",
+        "start_block": last_block,
+        "end_block": current_block,
+    }
+
+
 @bot.on_worker_startup()
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()
@@ -183,24 +278,24 @@ def worker_startup(state: TaskiqState):
     }
 
 
-@bot.on_(POOL.Borrow)
 def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     *_, health_factor = POOL.getUserAccountData(log.onBehalfOf)
 
     if log.onBehalfOf in context.state.borrowers:
-        context.state.borrowers[log.onBehalfOf].update(
-            {"health_factor": health_factor, "last_hf_update": log.block_number}
+        update_borrower_health_factor(
+            borrower=log.onBehalfOf,
+            health_factor=health_factor,
+            block_number=log.block_number,
+            borrowers=context.state.borrowers,
         )
     else:
-        context.state.borrowers[log.onBehalfOf] = {
-            "health_factor": health_factor,
-            "last_hf_update": log.block_number,
-        }
-        context.state.positions[log.onBehalfOf] = {
-            "debt_assets": "",
-            "collateral_assets": "",
-            "last_positions_update": 0,
-        }
+        initialize_new_borrower(
+            borrower=log.onBehalfOf,
+            health_factor=health_factor,
+            block_number=log.block_number,
+            borrowers=context.state.borrowers,
+            positions=context.state.positions,
+        )
 
     _save_borrowers_db(context.state.borrowers)
     _save_positions_db(context.state.positions)
@@ -237,6 +332,7 @@ def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends(
 @bot.on_(chain.blocks)
 def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
     updated_count, borrowers_checked = _process_pending_borrowers(context, block.number)
+    _update_block_state(block.number, context)
 
     return {
         "message": "Block execution completed",

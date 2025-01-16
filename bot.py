@@ -27,6 +27,9 @@ BLOCK_FILEPATH = os.environ.get("BLOCK_FILEPATH", ".db/block.csv")
 # Environment variables
 START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
 
+# Constants
+MAX_UINT = 2**256 - 1
+
 
 def _load_borrowers_db() -> Dict:
     dtype = {
@@ -163,6 +166,19 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
     return len(results_with_borrowers), borrowers_to_check
 
 
+def initialize_new_borrower(
+    borrower: str, health_factor: int, block_number: int, borrowers: Dict, positions: Dict
+) -> None:
+    borrowers[borrower] = {"health_factor": health_factor, "last_hf_update": block_number}
+    positions[borrower] = {"debt_assets": "", "collateral_assets": "", "last_positions_update": 0}
+
+
+def update_borrower_health_factor(
+    borrower: str, health_factor: int, block_number: int, borrowers: Dict
+) -> None:
+    borrowers[borrower].update({"health_factor": health_factor, "last_hf_update": block_number})
+
+
 @bot.on_worker_startup()
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()
@@ -183,24 +199,24 @@ def worker_startup(state: TaskiqState):
     }
 
 
-@bot.on_(POOL.Borrow)
 def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     *_, health_factor = POOL.getUserAccountData(log.onBehalfOf)
 
     if log.onBehalfOf in context.state.borrowers:
-        context.state.borrowers[log.onBehalfOf].update(
-            {"health_factor": health_factor, "last_hf_update": log.block_number}
+        update_borrower_health_factor(
+            borrower=log.onBehalfOf,
+            health_factor=health_factor,
+            block_number=log.block_number,
+            borrowers=context.state.borrowers,
         )
     else:
-        context.state.borrowers[log.onBehalfOf] = {
-            "health_factor": health_factor,
-            "last_hf_update": log.block_number,
-        }
-        context.state.positions[log.onBehalfOf] = {
-            "debt_assets": "",
-            "collateral_assets": "",
-            "last_positions_update": 0,
-        }
+        initialize_new_borrower(
+            borrower=log.onBehalfOf,
+            health_factor=health_factor,
+            block_number=log.block_number,
+            borrowers=context.state.borrowers,
+            positions=context.state.positions,
+        )
 
     _save_borrowers_db(context.state.borrowers)
     _save_positions_db(context.state.positions)

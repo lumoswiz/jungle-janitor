@@ -166,14 +166,14 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
     return len(results_with_borrowers), borrowers_to_check
 
 
-def initialize_new_borrower(
+def _initialize_new_borrower(
     borrower: str, health_factor: int, block_number: int, borrowers: Dict, positions: Dict
 ) -> None:
     borrowers[borrower] = {"health_factor": health_factor, "last_hf_update": block_number}
     positions[borrower] = {"debt_assets": "", "collateral_assets": "", "last_positions_update": 0}
 
 
-def update_borrower_health_factor(
+def _update_borrower_health_factor(
     borrower: str, health_factor: int, block_number: int, borrowers: Dict
 ) -> None:
     borrowers[borrower].update({"health_factor": health_factor, "last_hf_update": block_number})
@@ -278,18 +278,19 @@ def worker_startup(state: TaskiqState):
     }
 
 
+@bot.on_(POOL.Borrow)
 def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     *_, health_factor = POOL.getUserAccountData(log.onBehalfOf)
 
     if log.onBehalfOf in context.state.borrowers:
-        update_borrower_health_factor(
+        _update_borrower_health_factor(
             borrower=log.onBehalfOf,
             health_factor=health_factor,
             block_number=log.block_number,
             borrowers=context.state.borrowers,
         )
     else:
-        initialize_new_borrower(
+        _initialize_new_borrower(
             borrower=log.onBehalfOf,
             health_factor=health_factor,
             block_number=log.block_number,

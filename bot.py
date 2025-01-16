@@ -190,6 +190,27 @@ def _get_unique_borrowers_from_logs(
     return borrowers
 
 
+def _get_borrowers_health_factors(borrowers: dict) -> list:
+    call = multicall.Call()
+    for borrower in borrowers:
+        call.add(POOL.getUserAccountData, borrower)
+
+    results_with_borrowers = [
+        (
+            borrower,
+            {
+                "health_factor": result[-1],
+                "last_hf_update": borrowers[borrower],
+            },
+        )
+        for borrower, result in zip(borrowers, call())
+        if result is not None and result[-1] != MAX_UINT
+    ]
+
+    click.echo(f"Retrieved health factors for {len(results_with_borrowers)} active borrowers")
+    return results_with_borrowers
+
+
 @bot.on_worker_startup()
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()

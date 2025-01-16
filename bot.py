@@ -8,7 +8,7 @@ from ape import Contract, chain
 from ape.api import BlockAPI
 from ape.types import ContractLog
 from ape_ethereum import multicall
-from silverback import SilverbackBot
+from silverback import BotState, SilverbackBot
 from taskiq import Context, TaskiqDepends, TaskiqState
 
 # Initialize bot
@@ -236,6 +236,28 @@ def _update_borrowers_from_history(results: list) -> None:
         )
 
 
+def _process_historical_events(
+    start_block: int,
+    stop_block: int,
+) -> None:
+    click.echo(f"Processing historical events from block {start_block} to {stop_block}")
+    borrowers = _get_unique_borrowers_from_logs(start_block, stop_block)
+    results = _get_borrowers_health_factors(borrowers)
+    _update_borrowers_from_history(results)
+
+
+@bot.on_startup()
+def bot_startup(startup_state: BotState):
+    last_block = _load_block_db()["last_processed_block"]
+    current_block = chain.blocks.head.number
+    _process_historical_events(last_block, current_block)
+    return {
+        "message": "Historical processing complete",
+        "start_block": last_block,
+        "end_block": current_block,
+    }
+
+
 @bot.on_worker_startup()
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()
@@ -310,6 +332,7 @@ def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends(
 @bot.on_(chain.blocks)
 def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
     updated_count, borrowers_checked = _process_pending_borrowers(context, block.number)
+    _update_block_state(block.number, context)
 
     return {
         "message": "Block execution completed",

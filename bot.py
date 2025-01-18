@@ -28,6 +28,9 @@ START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
 
 # Constants
 MAX_UINT = 2**256 - 1
+AT_RISK_HF_THRESHOLD = 1.5 * 10**18
+AT_RISK_BLOCK_CHECK = 10
+REGULAR_BLOCK_CHECK = 75
 
 
 def _load_borrowers_db() -> Dict:

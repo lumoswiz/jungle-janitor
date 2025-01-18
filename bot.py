@@ -128,7 +128,7 @@ def _update_block_state(block_number: int, context: Context):
     _save_block_db(context.state.block_state)
 
 
-def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int, list]:
+def _process_pending_borrowers(context: Context, block_number: int) -> Dict:
     borrowers_to_check = [
         address
         for address, data in context.state.positions.items()
@@ -136,7 +136,7 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
     ]
 
     if not borrowers_to_check:
-        return 0, []
+        return {"pending_processed": 0, "total_checked": 0, "success_count": 0}
 
     call = multicall.Call()
     for borrower in borrowers_to_check:
@@ -161,7 +161,11 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
     if results_with_borrowers:
         _save_positions_db(context.state.positions)
 
-    return len(results_with_borrowers), borrowers_to_check
+    return {
+        "pending_processed": len(results_with_borrowers),
+        "total_checked": len(borrowers_to_check),
+        "success_count": len(results_with_borrowers),
+    }
 
 
 def _initialize_new_borrower(

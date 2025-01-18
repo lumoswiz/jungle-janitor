@@ -33,7 +33,7 @@ MAX_UINT = 2**256 - 1
 def _load_borrowers_db() -> Dict:
     dtype = {
         "borrower_address": str,
-        "health_factor": object,
+        "health_factor": np.int64,
         "last_hf_update": np.int64,
     }
     df = (

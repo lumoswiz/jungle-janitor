@@ -240,6 +240,55 @@ def _process_historical_events(
     _update_borrowers_from_history(results)
 
 
+def _sync_health_factors(context: Context, current_block: int) -> Dict:
+    at_risk_borrowers = [
+        address
+        for address, data in context.state.borrowers.items()
+        if (
+            data["health_factor"] < AT_RISK_HF_THRESHOLD
+            and current_block - data["last_hf_update"] > AT_RISK_BLOCK_CHECK
+        )
+    ]
+
+    safe_borrowers = [
+        address
+        for address, data in context.state.borrowers.items()
+        if (
+            data["health_factor"] >= AT_RISK_HF_THRESHOLD
+            and current_block - data["last_hf_update"] > REGULAR_BLOCK_CHECK
+        )
+    ]
+
+    borrowers_to_check = at_risk_borrowers + safe_borrowers
+    if not borrowers_to_check:
+        return {"updated_count": 0, "at_risk_checked": 0, "safe_checked": 0, "total_checked": 0}
+
+    call = multicall.Call()
+    for borrower in borrowers_to_check:
+        call.add(POOL.getUserAccountData, borrower)
+
+    results = [
+        (borrower, result[-1])
+        for borrower, result in zip(borrowers_to_check, call())
+        if result is not None and result[-1] != MAX_UINT
+    ]
+
+    for borrower, health_factor in results:
+        context.state.borrowers[borrower].update(
+            {"health_factor": health_factor, "last_hf_update": current_block}
+        )
+
+    if results:
+        _save_borrowers_db(context.state.borrowers)
+
+    return {
+        "updated_count": len(results),
+        "at_risk_checked": len(at_risk_borrowers),
+        "safe_checked": len(safe_borrowers),
+        "total_checked": len(borrowers_to_check),
+    }
+
+
 @bot.on_startup()
 def bot_startup(startup_state: BotState):
     last_block = _load_block_db()["last_processed_block"]

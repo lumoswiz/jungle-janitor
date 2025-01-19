@@ -36,7 +36,7 @@ REGULAR_BLOCK_CHECK = 75
 def _load_borrowers_db() -> Dict:
     dtype = {
         "borrower_address": str,
-        "health_factor": np.int64,
+        "health_factor": object,
         "last_hf_update": np.int64,
     }
     df = (
@@ -99,7 +99,10 @@ def _update_user_data(address, log, context):
             del context.state.positions[address]
         else:
             context.state.borrowers[address].update(
-                {"health_factor": health_factor, "last_hf_update": log.block_number}
+                {
+                    "health_factor": str(health_factor),
+                    "last_hf_update": log.block_number,
+                }
             )
         _save_borrowers_db(context.state.borrowers)
         _save_positions_db(context.state.positions)
@@ -171,14 +174,19 @@ def _process_pending_borrowers(context: Context, block_number: int) -> Dict:
 def _initialize_new_borrower(
     borrower: str, health_factor: int, block_number: int, borrowers: Dict, positions: Dict
 ) -> None:
-    borrowers[borrower] = {"health_factor": health_factor, "last_hf_update": block_number}
+    borrowers[borrower] = {
+        "health_factor": str(health_factor),
+        "last_hf_update": block_number,
+    }
     positions[borrower] = {"debt_assets": "", "collateral_assets": "", "last_positions_update": 0}
 
 
 def _update_borrower_health_factor(
     borrower: str, health_factor: int, block_number: int, borrowers: Dict
 ) -> None:
-    borrowers[borrower].update({"health_factor": health_factor, "last_hf_update": block_number})
+    borrowers[borrower].update(
+        {"health_factor": str(health_factor), "last_hf_update": block_number}
+    )
 
 
 def _get_unique_borrowers_from_logs(
@@ -245,7 +253,7 @@ def _sync_health_factors(context: Context, current_block: int) -> Dict:
         address
         for address, data in context.state.borrowers.items()
         if (
-            data["health_factor"] < AT_RISK_HF_THRESHOLD
+            pd.to_numeric(data["health_factor"]) < AT_RISK_HF_THRESHOLD
             and current_block - data["last_hf_update"] > AT_RISK_BLOCK_CHECK
         )
     ]
@@ -254,7 +262,7 @@ def _sync_health_factors(context: Context, current_block: int) -> Dict:
         address
         for address, data in context.state.borrowers.items()
         if (
-            data["health_factor"] >= AT_RISK_HF_THRESHOLD
+            pd.to_numeric(data["health_factor"]) >= AT_RISK_HF_THRESHOLD
             and current_block - data["last_hf_update"] > REGULAR_BLOCK_CHECK
         )
     ]
@@ -275,7 +283,7 @@ def _sync_health_factors(context: Context, current_block: int) -> Dict:
 
     for borrower, health_factor in results:
         context.state.borrowers[borrower].update(
-            {"health_factor": health_factor, "last_hf_update": current_block}
+            {"health_factor": str(health_factor), "last_hf_update": current_block}
         )
 
     if results:

@@ -28,6 +28,9 @@ START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
 
 # Constants
 MAX_UINT = 2**256 - 1
+AT_RISK_HF_THRESHOLD = 1.5 * 10**18
+AT_RISK_BLOCK_CHECK = 10
+REGULAR_BLOCK_CHECK = 75
 
 
 def _load_borrowers_db() -> Dict:
@@ -96,7 +99,10 @@ def _update_user_data(address, log, context):
             del context.state.positions[address]
         else:
             context.state.borrowers[address].update(
-                {"health_factor": health_factor, "last_hf_update": log.block_number}
+                {
+                    "health_factor": str(health_factor),
+                    "last_hf_update": log.block_number,
+                }
             )
         _save_borrowers_db(context.state.borrowers)
         _save_positions_db(context.state.positions)
@@ -125,7 +131,7 @@ def _update_block_state(block_number: int, context: Context):
     _save_block_db(context.state.block_state)
 
 
-def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int, list]:
+def _process_pending_borrowers(context: Context, block_number: int) -> Dict:
     borrowers_to_check = [
         address
         for address, data in context.state.positions.items()
@@ -133,7 +139,7 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
     ]
 
     if not borrowers_to_check:
-        return 0, []
+        return {"pending_processed": 0, "total_checked": 0, "success_count": 0}
 
     call = multicall.Call()
     for borrower in borrowers_to_check:
@@ -158,20 +164,29 @@ def _process_pending_borrowers(context: Context, block_number: int) -> tuple[int
     if results_with_borrowers:
         _save_positions_db(context.state.positions)
 
-    return len(results_with_borrowers), borrowers_to_check
+    return {
+        "pending_processed": len(results_with_borrowers),
+        "total_checked": len(borrowers_to_check),
+        "success_count": len(results_with_borrowers),
+    }
 
 
 def _initialize_new_borrower(
     borrower: str, health_factor: int, block_number: int, borrowers: Dict, positions: Dict
 ) -> None:
-    borrowers[borrower] = {"health_factor": health_factor, "last_hf_update": block_number}
+    borrowers[borrower] = {
+        "health_factor": str(health_factor),
+        "last_hf_update": block_number,
+    }
     positions[borrower] = {"debt_assets": "", "collateral_assets": "", "last_positions_update": 0}
 
 
 def _update_borrower_health_factor(
     borrower: str, health_factor: int, block_number: int, borrowers: Dict
 ) -> None:
-    borrowers[borrower].update({"health_factor": health_factor, "last_hf_update": block_number})
+    borrowers[borrower].update(
+        {"health_factor": str(health_factor), "last_hf_update": block_number}
+    )
 
 
 def _get_unique_borrowers_from_logs(
@@ -231,6 +246,55 @@ def _process_historical_events(
     borrowers = _get_unique_borrowers_from_logs(start_block, stop_block)
     results = _get_borrowers_health_factors(borrowers)
     _update_borrowers_from_history(results)
+
+
+def _sync_health_factors(context: Context, current_block: int) -> Dict:
+    at_risk_borrowers = [
+        address
+        for address, data in context.state.borrowers.items()
+        if (
+            pd.to_numeric(data["health_factor"]) < AT_RISK_HF_THRESHOLD
+            and current_block - data["last_hf_update"] > AT_RISK_BLOCK_CHECK
+        )
+    ]
+
+    safe_borrowers = [
+        address
+        for address, data in context.state.borrowers.items()
+        if (
+            pd.to_numeric(data["health_factor"]) >= AT_RISK_HF_THRESHOLD
+            and current_block - data["last_hf_update"] > REGULAR_BLOCK_CHECK
+        )
+    ]
+
+    borrowers_to_check = at_risk_borrowers + safe_borrowers
+    if not borrowers_to_check:
+        return {"updated_count": 0, "at_risk_checked": 0, "safe_checked": 0, "total_checked": 0}
+
+    call = multicall.Call()
+    for borrower in borrowers_to_check:
+        call.add(POOL.getUserAccountData, borrower)
+
+    results = [
+        (borrower, result[-1])
+        for borrower, result in zip(borrowers_to_check, call())
+        if result is not None and result[-1] != MAX_UINT
+    ]
+
+    for borrower, health_factor in results:
+        context.state.borrowers[borrower].update(
+            {"health_factor": str(health_factor), "last_hf_update": current_block}
+        )
+
+    if results:
+        _save_borrowers_db(context.state.borrowers)
+
+    return {
+        "updated_count": len(results),
+        "at_risk_checked": len(at_risk_borrowers),
+        "safe_checked": len(safe_borrowers),
+        "total_checked": len(borrowers_to_check),
+    }
 
 
 @bot.on_startup()
@@ -312,12 +376,13 @@ def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends(
 
 @bot.on_(chain.blocks)
 def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
-    updated_count, borrowers_checked = _process_pending_borrowers(context, block.number)
+    hf_sync_results = _sync_health_factors(context, block.number)
+    pending_results = _process_pending_borrowers(context, block.number)
     _update_block_state(block.number, context)
 
     return {
         "message": "Block execution completed",
-        "borrowers_checked": len(borrowers_checked),
-        "borrowers_updated": updated_count,
+        "pending_updates": pending_results,
+        "health_factor_updates": hf_sync_results,
         "block_number": block.number,
     }

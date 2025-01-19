@@ -368,12 +368,13 @@ def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends(
 
 @bot.on_(chain.blocks)
 def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
-    updated_count, borrowers_checked = _process_pending_borrowers(context, block.number)
+    hf_sync_results = _sync_health_factors(context, block.number)
+    pending_results = _process_pending_borrowers(context, block.number)
     _update_block_state(block.number, context)
 
     return {
         "message": "Block execution completed",
-        "borrowers_checked": len(borrowers_checked),
-        "borrowers_updated": updated_count,
+        "pending_updates": pending_results,
+        "health_factor_updates": hf_sync_results,
         "block_number": block.number,
     }

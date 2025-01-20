@@ -1,5 +1,5 @@
 import os
-from typing import Annotated, Dict, List, Tuple
+from typing import Annotated, Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -181,6 +181,85 @@ def _sync_health_factors(context: Context, current_block: int) -> Dict:
         "at_risk_checked": len(at_risk_borrowers),
         "safe_checked": len(safe_borrowers),
         "total_checked": len(borrowers_to_check),
+    }
+
+
+def _identify_liquidatable_borrowers(borrowers: Dict) -> List[str]:
+    return [
+        address
+        for address, data in borrowers.items()
+        if int(data["health_factor"]) < LIQUIDATION_HF_THRESHOLD
+    ]
+
+
+def _parse_user_reserves_data(reserves_data: Any) -> Dict:
+    collateral_positions = [
+        (reserve.underlyingAsset, reserve.scaledATokenBalance)
+        for reserve in reserves_data
+        if reserve.scaledATokenBalance > 0 and reserve.usageAsCollateralEnabled
+    ]
+
+    debt_positions = [
+        (reserve.underlyingAsset, reserve.scaledVariableDebt)
+        for reserve in reserves_data
+        if reserve.scaledVariableDebt > 0
+    ]
+
+    return {
+        "collateral_positions": collateral_positions,
+        "debt_positions": debt_positions,
+    }
+
+
+def _get_liquidatable_data(borrowers_to_check: List[str], context: Context) -> Dict:
+    if not borrowers_to_check:
+        return {}
+
+    liquidatable_data = {}
+
+    for i in range(0, len(borrowers_to_check), MULTICALL_BATCH_SIZE):
+        batch = borrowers_to_check[i : i + MULTICALL_BATCH_SIZE]
+
+        call = multicall.Call()
+        for borrower in batch:
+            args = (POOL_ADDRESSES_PROVIDER, borrower)
+            call.add(UI_POOL_DATA_PROVIDER_V3.getUserReservesData, *args)
+
+        results = [
+            (borrower, result) for borrower, result in zip(batch, call()) if result is not None
+        ]
+
+        for borrower, (reserves_data, *_) in results:
+            positions = _parse_user_reserves_data(reserves_data)
+            health_factor = int(context.state.borrowers[borrower]["health_factor"])
+
+            liquidatable_data[borrower] = {
+                "health_factor": health_factor,
+                "collateral_positions": positions["collateral_positions"],
+                "debt_positions": positions["debt_positions"],
+                "can_be_max_liquidated": health_factor < MAX_LIQUIDATION_HF_THRESHOLD,
+            }
+
+    return liquidatable_data
+
+
+def _execute_liquidations(context: Context) -> Dict:
+    liquidatable_borrowers = _identify_liquidatable_borrowers(context.state.borrowers)
+
+    if not liquidatable_borrowers:
+        return {"liquidations_processed": 0}
+
+    liquidatable_data = _get_liquidatable_data(liquidatable_borrowers, context)
+
+    # TODO: Execute liquidations
+    # - Logic for optimal collateral/debt pairs
+    # - Profitability calculations
+    # - Liquidation execution
+
+    return {
+        "liquidatable_borrowers": len(liquidatable_borrowers),
+        "positions_processed": len(liquidatable_data),
+        "liquidations_executed": 0,
     }
 
 

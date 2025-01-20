@@ -1,5 +1,5 @@
 import os
-from typing import Annotated, Dict
+from typing import Annotated, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,6 +16,7 @@ bot = SilverbackBot()
 # Contracts
 POOL_ADDRESSES_PROVIDER = Contract(os.environ["POOL_ADDRESSES_PROVIDER"])
 POOL = Contract(POOL_ADDRESSES_PROVIDER.getPool())
+UI_POOL_DATA_PROVIDER_V3 = Contract(os.environ["UI_POOL_DATA_PROVIDER_V3"])
 
 # File paths
 BORROWERS_FILEPATH = os.environ.get("BORROWERS_FILEPATH", ".db/borrowers.csv")
@@ -24,6 +25,8 @@ BLOCK_FILEPATH = os.environ.get("BLOCK_FILEPATH", ".db/block.csv")
 # Constants
 MAX_UINT = 2**256 - 1
 START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
+MAX_LIQUIDATION_HF_THRESHOLD = 0.95 * 10**18
+LIQUIDATION_HF_THRESHOLD = 1 * 10**18
 AT_RISK_HF_THRESHOLD = 1.5 * 10**18
 AT_RISK_BLOCK_CHECK = 10
 REGULAR_BLOCK_CHECK = 75
@@ -81,12 +84,12 @@ def _update_user_data(address, log, context):
         _save_borrowers_db(context.state.borrowers)
 
 
-def _get_unique_borrowers_from_logs(start_block: int, stop_block: int) -> dict:
+def _get_unique_borrowers_from_logs(start_block: int, stop_block: int) -> Dict[str, int]:
     logs = POOL.Borrow.range(start_or_stop=start_block, stop=stop_block)
     return {log.onBehalfOf: log.block_number for log in logs}
 
 
-def _get_borrowers_health_factors(borrowers_addresses: list) -> list:
+def _get_borrowers_health_factors(borrowers_addresses: List[str]) -> List[Tuple]:
     call = multicall.Call()
     for borrower in borrowers_addresses:
         call.add(POOL.getUserAccountData, borrower)

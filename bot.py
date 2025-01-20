@@ -6,6 +6,7 @@ import pandas as pd
 from ape import Contract, chain
 from ape.api import BlockAPI
 from ape.types import ContractLog
+from ape_ethereum import multicall
 from silverback import BotState, SilverbackBot
 from taskiq import Context, TaskiqDepends, TaskiqState
 
@@ -26,6 +27,7 @@ START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
 AT_RISK_HF_THRESHOLD = 1.5 * 10**18
 AT_RISK_BLOCK_CHECK = 10
 REGULAR_BLOCK_CHECK = 75
+MULTICALL_BATCH_SIZE = 50
 
 
 def _load_borrowers_db() -> Dict:
@@ -79,10 +81,56 @@ def _update_user_data(address, log, context):
         _save_borrowers_db(context.state.borrowers)
 
 
+def _get_unique_borrowers_from_logs(start_block: int, stop_block: int) -> dict:
+    logs = POOL.Borrow.range(start_or_stop=start_block, stop=stop_block)
+    return {log.onBehalfOf: log.block_number for log in logs}
+
+
+def _get_borrowers_health_factors(borrowers_addresses: list) -> list:
+    call = multicall.Call()
+    for borrower in borrowers_addresses:
+        call.add(POOL.getUserAccountData, borrower)
+
+    return [
+        (borrower, result[-1])
+        for borrower, result in zip(borrowers_addresses, call())
+        if result is not None and result[-1] != MAX_UINT
+    ]
+
+
+def _process_historical_events(start_block: int, stop_block: int) -> None:
+    borrowers = _get_unique_borrowers_from_logs(start_block, stop_block)
+    borrower_addresses = list(borrowers.keys())
+
+    for i in range(0, len(borrower_addresses), MULTICALL_BATCH_SIZE):
+        batch = borrower_addresses[i : i + MULTICALL_BATCH_SIZE]
+
+        results = _get_borrowers_health_factors(batch)
+
+        current_borrowers = _load_borrowers_db()
+
+        for borrower, health_factor in results:
+            current_borrowers[borrower] = {
+                "health_factor": str(health_factor),
+                "last_hf_update": borrowers[borrower],
+            }
+
+        _save_borrowers_db(current_borrowers)
+
+
 @bot.on_startup()
 def bot_startup(startup_state: BotState):
+    # Load blocks
     last_block = _load_block_db()["last_processed_block"]
     current_block = chain.blocks.head.number
+
+    # Process historical borrow events
+    _process_historical_events(last_block, current_block)
+
+    # Update block state
+    block_state = {"last_processed_block": current_block}
+    _save_block_db(block_state)
+
     return {
         "message": "Bot started",
         "start_block": last_block,

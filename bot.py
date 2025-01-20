@@ -6,7 +6,6 @@ import pandas as pd
 from ape import Contract, chain
 from ape.api import BlockAPI
 from ape.types import ContractLog
-from ape_ethereum import multicall
 from silverback import BotState, SilverbackBot
 from taskiq import Context, TaskiqDepends, TaskiqState
 
@@ -16,18 +15,14 @@ bot = SilverbackBot()
 # Contracts
 POOL_ADDRESSES_PROVIDER = Contract(os.environ["POOL_ADDRESSES_PROVIDER"])
 POOL = Contract(POOL_ADDRESSES_PROVIDER.getPool())
-UI_POOL_DATA_PROVIDER_V3 = Contract(os.environ["UI_POOL_DATA_PROVIDER_V3"])
 
-# File paths for persistent storage
+# File paths
 BORROWERS_FILEPATH = os.environ.get("BORROWERS_FILEPATH", ".db/borrowers.csv")
-POSITIONS_FILEPATH = os.environ.get("POSITIONS_FILEPATH", ".db/positions.csv")
 BLOCK_FILEPATH = os.environ.get("BLOCK_FILEPATH", ".db/block.csv")
-
-# Environment variables
-START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
 
 # Constants
 MAX_UINT = 2**256 - 1
+START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
 AT_RISK_HF_THRESHOLD = 1.5 * 10**18
 AT_RISK_BLOCK_CHECK = 10
 REGULAR_BLOCK_CHECK = 75
@@ -42,21 +37,6 @@ def _load_borrowers_db() -> Dict:
     df = (
         pd.read_csv(BORROWERS_FILEPATH, dtype=dtype)
         if os.path.exists(BORROWERS_FILEPATH)
-        else pd.DataFrame(columns=dtype.keys()).astype(dtype)
-    )
-    return df.set_index("borrower_address").to_dict("index")
-
-
-def _load_positions_db() -> Dict:
-    dtype = {
-        "borrower_address": str,
-        "debt_assets": object,
-        "collateral_assets": object,
-        "last_positions_update": np.int64,
-    }
-    df = (
-        pd.read_csv(POSITIONS_FILEPATH, dtype=dtype)
-        if os.path.exists(POSITIONS_FILEPATH)
         else pd.DataFrame(columns=dtype.keys()).astype(dtype)
     )
     return df.set_index("borrower_address").to_dict("index")
@@ -78,13 +58,6 @@ def _save_borrowers_db(data: Dict):
     df.to_csv(BORROWERS_FILEPATH, index=False)
 
 
-def _save_positions_db(data: Dict):
-    os.makedirs(os.path.dirname(POSITIONS_FILEPATH), exist_ok=True)
-    df = pd.DataFrame.from_dict(data, orient="index").reset_index()
-    df.columns = ["borrower_address", "debt_assets", "collateral_assets", "last_positions_update"]
-    df.to_csv(POSITIONS_FILEPATH, index=False)
-
-
 def _save_block_db(data: Dict):
     os.makedirs(os.path.dirname(BLOCK_FILEPATH), exist_ok=True)
     df = pd.DataFrame([data])
@@ -96,7 +69,6 @@ def _update_user_data(address, log, context):
         *_, health_factor = POOL.getUserAccountData(address)
         if health_factor == 2**256 - 1:
             del context.state.borrowers[address]
-            del context.state.positions[address]
         else:
             context.state.borrowers[address].update(
                 {
@@ -105,205 +77,14 @@ def _update_user_data(address, log, context):
                 }
             )
         _save_borrowers_db(context.state.borrowers)
-        _save_positions_db(context.state.positions)
-
-
-def _update_borrower_positions(borrower: str, reserves_data) -> dict:
-    collateral_assets = [
-        reserve.underlyingAsset for reserve in reserves_data if reserve.scaledATokenBalance > 0
-    ]
-
-    debt_assets = [
-        reserve.underlyingAsset for reserve in reserves_data if reserve.scaledVariableDebt > 0
-    ]
-
-    return {
-        "collateral_assets": collateral_assets,
-        "debt_assets": debt_assets,
-    }
-
-
-def _update_block_state(block_number: int, context: Context):
-    if not hasattr(context.state, "block_state"):
-        context.state.block_state = _load_block_db()
-
-    context.state.block_state = {"last_processed_block": block_number}
-    _save_block_db(context.state.block_state)
-
-
-def _process_pending_borrowers(context: Context, block_number: int) -> Dict:
-    borrowers_to_check = [
-        address
-        for address, data in context.state.positions.items()
-        if data["last_positions_update"] == 0
-    ]
-
-    if not borrowers_to_check:
-        return {"pending_processed": 0, "total_checked": 0, "success_count": 0}
-
-    call = multicall.Call()
-    for borrower in borrowers_to_check:
-        args = (POOL_ADDRESSES_PROVIDER, borrower)
-        call.add(UI_POOL_DATA_PROVIDER_V3.getUserReservesData, *args)
-
-    results_with_borrowers = [
-        (borrower, result)
-        for borrower, result in zip(borrowers_to_check, call())
-        if result is not None
-    ]
-
-    for borrower, (reserves_data, _) in results_with_borrowers:
-        position_data = _update_borrower_positions(borrower, reserves_data)
-        context.state.positions[borrower].update(
-            {
-                **position_data,
-                "last_positions_update": block_number,
-            }
-        )
-
-    if results_with_borrowers:
-        _save_positions_db(context.state.positions)
-
-    return {
-        "pending_processed": len(results_with_borrowers),
-        "total_checked": len(borrowers_to_check),
-        "success_count": len(results_with_borrowers),
-    }
-
-
-def _initialize_new_borrower(
-    borrower: str, health_factor: int, block_number: int, borrowers: Dict, positions: Dict
-) -> None:
-    borrowers[borrower] = {
-        "health_factor": str(health_factor),
-        "last_hf_update": block_number,
-    }
-    positions[borrower] = {"debt_assets": "", "collateral_assets": "", "last_positions_update": 0}
-
-
-def _update_borrower_health_factor(
-    borrower: str, health_factor: int, block_number: int, borrowers: Dict
-) -> None:
-    borrowers[borrower].update(
-        {"health_factor": str(health_factor), "last_hf_update": block_number}
-    )
-
-
-def _get_unique_borrowers_from_logs(
-    start_block: int,
-    stop_block: int,
-) -> dict:
-    logs = POOL.Borrow.range(start_or_stop=start_block, stop=stop_block)
-    borrowers = {log.onBehalfOf: log.block_number for log in logs}
-    return borrowers
-
-
-def _get_borrowers_health_factors(borrowers: dict) -> list:
-    call = multicall.Call()
-    for borrower in borrowers:
-        call.add(POOL.getUserAccountData, borrower)
-
-    results_with_borrowers = [
-        (
-            borrower,
-            {
-                "health_factor": result[-1],
-                "last_hf_update": borrowers[borrower],
-            },
-        )
-        for borrower, result in zip(borrowers, call())
-        if result is not None and result[-1] != MAX_UINT
-    ]
-    return results_with_borrowers
-
-
-def _update_borrowers_from_history(results: list) -> None:
-    borrowers = _load_borrowers_db()
-    positions = _load_positions_db()
-
-    borrowers_to_check = []
-    for borrower, data in results:
-        if borrower in borrowers:
-            borrowers[borrower].update(data)
-        else:
-            borrowers[borrower] = data
-            positions[borrower] = {
-                "debt_assets": "",
-                "collateral_assets": "",
-                "last_positions_update": 0,
-            }
-            borrowers_to_check.append(borrower)
-
-    if results:
-        _save_borrowers_db(borrowers)
-        _save_positions_db(positions)
-
-
-def _process_historical_events(
-    start_block: int,
-    stop_block: int,
-) -> None:
-    borrowers = _get_unique_borrowers_from_logs(start_block, stop_block)
-    results = _get_borrowers_health_factors(borrowers)
-    _update_borrowers_from_history(results)
-
-
-def _sync_health_factors(context: Context, current_block: int) -> Dict:
-    at_risk_borrowers = [
-        address
-        for address, data in context.state.borrowers.items()
-        if (
-            pd.to_numeric(data["health_factor"]) < AT_RISK_HF_THRESHOLD
-            and current_block - data["last_hf_update"] > AT_RISK_BLOCK_CHECK
-        )
-    ]
-
-    safe_borrowers = [
-        address
-        for address, data in context.state.borrowers.items()
-        if (
-            pd.to_numeric(data["health_factor"]) >= AT_RISK_HF_THRESHOLD
-            and current_block - data["last_hf_update"] > REGULAR_BLOCK_CHECK
-        )
-    ]
-
-    borrowers_to_check = at_risk_borrowers + safe_borrowers
-    if not borrowers_to_check:
-        return {"updated_count": 0, "at_risk_checked": 0, "safe_checked": 0, "total_checked": 0}
-
-    call = multicall.Call()
-    for borrower in borrowers_to_check:
-        call.add(POOL.getUserAccountData, borrower)
-
-    results = [
-        (borrower, result[-1])
-        for borrower, result in zip(borrowers_to_check, call())
-        if result is not None and result[-1] != MAX_UINT
-    ]
-
-    for borrower, health_factor in results:
-        context.state.borrowers[borrower].update(
-            {"health_factor": str(health_factor), "last_hf_update": current_block}
-        )
-
-    if results:
-        _save_borrowers_db(context.state.borrowers)
-
-    return {
-        "updated_count": len(results),
-        "at_risk_checked": len(at_risk_borrowers),
-        "safe_checked": len(safe_borrowers),
-        "total_checked": len(borrowers_to_check),
-    }
 
 
 @bot.on_startup()
 def bot_startup(startup_state: BotState):
     last_block = _load_block_db()["last_processed_block"]
     current_block = chain.blocks.head.number
-    _process_historical_events(last_block, current_block)
     return {
-        "message": "Historical processing complete",
+        "message": "Bot started",
         "start_block": last_block,
         "end_block": current_block,
     }
@@ -312,12 +93,10 @@ def bot_startup(startup_state: BotState):
 @bot.on_worker_startup()
 def worker_startup(state: TaskiqState):
     state.borrowers = _load_borrowers_db()
-    state.positions = _load_positions_db()
     state.block_state = _load_block_db()
     return {
         "message": "Worker started",
         "borrowers_count": len(state.borrowers),
-        "positions_count": len(state.positions),
         "last_processed_block": state.block_state["last_processed_block"],
     }
 
@@ -326,25 +105,12 @@ def worker_startup(state: TaskiqState):
 def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     *_, health_factor = POOL.getUserAccountData(log.onBehalfOf)
 
-    if log.onBehalfOf in context.state.borrowers:
-        _update_borrower_health_factor(
-            borrower=log.onBehalfOf,
-            health_factor=health_factor,
-            block_number=log.block_number,
-            borrowers=context.state.borrowers,
-        )
-    else:
-        _initialize_new_borrower(
-            borrower=log.onBehalfOf,
-            health_factor=health_factor,
-            block_number=log.block_number,
-            borrowers=context.state.borrowers,
-            positions=context.state.positions,
-        )
-
-    _save_borrowers_db(context.state.borrowers)
-    _save_positions_db(context.state.positions)
-    _update_block_state(log.block_number, context)
+    if health_factor != MAX_UINT:
+        context.state.borrowers[log.onBehalfOf] = {
+            "health_factor": str(health_factor),
+            "last_hf_update": log.block_number,
+        }
+        _save_borrowers_db(context.state.borrowers)
 
     return {
         "borrower": log.onBehalfOf,
@@ -356,33 +122,23 @@ def handle_borrow(log: ContractLog, context: Annotated[Context, TaskiqDepends()]
 @bot.on_(POOL.Supply)
 def handle_supply(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     _update_user_data(log.onBehalfOf, log, context)
-    _update_block_state(log.block_number, context)
     return {"borrower": log.onBehalfOf, "block_number": log.block_number}
 
 
 @bot.on_(POOL.Repay)
 def handle_repay(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     _update_user_data(log.user, log, context)
-    _update_block_state(log.block_number, context)
     return {"borrower": log.user, "block_number": log.block_number}
 
 
 @bot.on_(POOL.Withdraw)
 def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends()]):
     _update_user_data(log.user, log, context)
-    _update_block_state(log.block_number, context)
     return {"borrower": log.user, "block_number": log.block_number}
 
 
 @bot.on_(chain.blocks)
 def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
-    hf_sync_results = _sync_health_factors(context, block.number)
-    pending_results = _process_pending_borrowers(context, block.number)
-    _update_block_state(block.number, context)
-
-    return {
-        "message": "Block execution completed",
-        "pending_updates": pending_results,
-        "health_factor_updates": hf_sync_results,
-        "block_number": block.number,
-    }
+    context.state.block_state["last_processed_block"] = block.number
+    _save_block_db(context.state.block_state)
+    return {"block_number": block.number}

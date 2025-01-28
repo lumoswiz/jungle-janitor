@@ -1,7 +1,6 @@
 import os
 from typing import Annotated, Any, Dict, List, Tuple
 
-import click
 import numpy as np
 import pandas as pd
 from ape import Contract, chain
@@ -243,18 +242,15 @@ def _update_reserve_configs() -> Dict[str, Dict]:
     reserve_addresses = _get_all_reserves()
 
     configurations = _get_reserve_configurations(reserve_addresses)
-    prices = _get_reserve_prices(reserve_addresses)
     current_block = chain.blocks.head.number
 
     reserve_configs = {}
     for i, address in enumerate(reserve_addresses):
         decimals, liquidation_bonus = configurations[i]
-        price = prices[i]
 
         reserve_configs[address] = {
             "decimals": decimals,
             "liquidation_bonus": liquidation_bonus,
-            "price": price,
             "last_update_block": current_block,
         }
 
@@ -381,8 +377,6 @@ def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends(
 
 @bot.on_(chain.blocks)
 def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
-    click.echo(f"Number of reserves: {len(bot.state.reserve_configs)}")
-
     sync_results = _sync_health_factors(context, block.number)
 
     context.state.block_state["last_processed_block"] = block.number

@@ -34,6 +34,10 @@ AT_RISK_HF_THRESHOLD = 1.5 * 10**18
 AT_RISK_BLOCK_CHECK = 10
 REGULAR_BLOCK_CHECK = 75
 MULTICALL_BATCH_SIZE = 50
+MAX_CLOSE_FACTOR = 10000
+DEFAULT_CLOSE_FACTOR = 5000
+NATIVE_ASSET_ADDRESS = "0xC02AAA39B223FE8D0A0E5C4F27EAD9083C756CC2"
+PRICE_ONE = 100000000
 
 
 def _load_borrowers_db() -> Dict:
@@ -195,22 +199,20 @@ def _identify_liquidatable_borrowers(borrowers: Dict) -> List[str]:
     ]
 
 
-def _parse_user_reserves_data(reserves_data: Any) -> Dict:
+def _parse_user_reserves_data(reserves_data: Any) -> Dict[str, List[str]]:
     collateral_positions = [
-        (reserve.underlyingAsset, reserve.scaledATokenBalance)
+        reserve.underlyingAsset
         for reserve in reserves_data
         if reserve.scaledATokenBalance > 0 and reserve.usageAsCollateralEnabled
     ]
 
     debt_positions = [
-        (reserve.underlyingAsset, reserve.scaledVariableDebt)
-        for reserve in reserves_data
-        if reserve.scaledVariableDebt > 0
+        reserve.underlyingAsset for reserve in reserves_data if reserve.scaledVariableDebt > 0
     ]
 
     return {
-        "collateral_positions": collateral_positions,
-        "debt_positions": debt_positions,
+        "collateral": collateral_positions,
+        "debt": debt_positions,
     }
 
 
@@ -234,10 +236,6 @@ def _get_reserve_configurations(reserve_addresses: List[str]) -> List[Tuple[int,
     return results
 
 
-def _get_reserve_prices(reserve_addresses: List[str]) -> List[int]:
-    return AAVE_ORACLE.getAssetsPrices(reserve_addresses)
-
-
 def _update_reserve_configs() -> Dict[str, Dict]:
     reserve_addresses = _get_all_reserves()
 
@@ -255,6 +253,29 @@ def _update_reserve_configs() -> Dict[str, Dict]:
         }
 
     return reserve_configs
+
+
+def _get_reserve_prices(reserve_addresses: List[str]) -> List[int]:
+    return AAVE_ORACLE.getAssetsPrices(reserve_addresses)
+
+
+def _get_user_reserve_data(user_address: str, reserve_addresses: List[str]) -> Dict[str, Dict]:
+    call = multicall.Call()
+
+    for address in reserve_addresses:
+        call.add(POOL_DATA_PROVIDER.getUserReserveData, address, user_address)
+
+    user_reserve_data = {}
+    for address, result in zip(reserve_addresses, call()):
+        if result is not None:
+            atoken_balance, _, variable_debt, *_ = result
+
+            user_reserve_data[address] = {
+                "atoken_balance": int(atoken_balance),
+                "variable_debt": int(variable_debt),
+            }
+
+    return user_reserve_data
 
 
 def _get_liquidatable_data(borrowers_to_check: List[str], context: Context) -> Dict:
@@ -287,26 +308,6 @@ def _get_liquidatable_data(borrowers_to_check: List[str], context: Context) -> D
             }
 
     return liquidatable_data
-
-
-def _execute_liquidations(context: Context) -> Dict:
-    liquidatable_borrowers = _identify_liquidatable_borrowers(context.state.borrowers)
-
-    if not liquidatable_borrowers:
-        return {"liquidations_processed": 0}
-
-    liquidatable_data = _get_liquidatable_data(liquidatable_borrowers, context)
-
-    # TODO: Execute liquidations
-    # - Logic for optimal collateral/debt pairs
-    # - Profitability calculations
-    # - Liquidation execution
-
-    return {
-        "liquidatable_borrowers": len(liquidatable_borrowers),
-        "positions_processed": len(liquidatable_data),
-        "liquidations_executed": 0,
-    }
 
 
 @bot.on_startup()

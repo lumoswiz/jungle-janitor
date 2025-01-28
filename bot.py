@@ -1,6 +1,8 @@
 import os
+from itertools import product
 from typing import Annotated, Any, Dict, List, Tuple
 
+import click
 import numpy as np
 import pandas as pd
 from ape import Contract, chain
@@ -38,6 +40,8 @@ MAX_CLOSE_FACTOR = 10000
 DEFAULT_CLOSE_FACTOR = 5000
 NATIVE_ASSET_ADDRESS = "0xC02AAA39B223FE8D0A0E5C4F27EAD9083C756CC2"
 PRICE_ONE = 100000000
+HALF_BPS = 5000
+BASE_BPS = 10000
 
 
 def _load_borrowers_db() -> Dict:
@@ -309,6 +313,163 @@ def _get_liquidatable_data(borrowers_to_check: List[str], context: Context) -> D
     return liquidatable_data
 
 
+def _build_liquidation_state(
+    liquidatable_borrowers: List[str],
+    reserve_prices: Dict[str, int],
+    reserve_configs: Dict[str, Dict],
+    context: Context,
+) -> Dict[str, Dict]:
+    liquidatable_data = _get_liquidatable_data(liquidatable_borrowers, context)
+    if not liquidatable_data:
+        return {}
+
+    liquidation_state = {}
+
+    for borrower, positions in liquidatable_data.items():
+        reserve_addresses = positions["collateral"] + positions["debt"]
+        user_reserves = _get_user_reserve_data(borrower, reserve_addresses)
+
+        collateral_state = {
+            reserve: {
+                "decimals": reserve_configs[reserve]["decimals"],
+                "liquidation_bonus": reserve_configs[reserve]["liquidation_bonus"],
+                "price": reserve_prices[reserve],
+                "balance": user_reserves[reserve]["atoken_balance"],
+            }
+            for reserve in positions["collateral"]
+        }
+
+        debt_state = {
+            reserve: {
+                "decimals": reserve_configs[reserve]["decimals"],
+                "price": reserve_prices[reserve],
+                "amount": user_reserves[reserve]["variable_debt"],
+            }
+            for reserve in positions["debt"]
+        }
+
+        liquidation_state[borrower] = {
+            "collateral": collateral_state,
+            "debt": debt_state,
+            "can_be_max_liquidated": positions["can_be_max_liquidated"],
+        }
+
+    return liquidation_state
+
+
+def _percent_mul(value: int, bps: int) -> int:
+    return (HALF_BPS + value * bps) // BASE_BPS
+
+
+def _percent_div(value: int, bps: int) -> int:
+    half_bps = bps // 2
+    return (half_bps + value * BASE_BPS) // bps
+
+
+def _calculate_base_collateral(
+    collateral: Dict[str, int], debt: Dict[str, int], debt_to_cover: int
+) -> int:
+    debt_unit = 10 ** debt["decimals"]
+    collateral_unit = 10 ** collateral["decimals"]
+
+    return (debt["price"] * debt_to_cover * collateral_unit) // (collateral["price"] * debt_unit)
+
+
+def _calculate_collateral_value_in_native(
+    collateral_address: str,
+    debt_address: str,
+    debt_to_cover: int,
+    borrower_state: Dict,
+    native_price: int,
+) -> int:
+    collateral = borrower_state["collateral"][collateral_address]
+    debt = borrower_state["debt"][debt_address]
+
+    collateral_price_native = (
+        PRICE_ONE
+        if collateral_address == NATIVE_ASSET_ADDRESS
+        else (collateral["price"] * PRICE_ONE) // native_price
+    )
+
+    base_collateral = _calculate_base_collateral(
+        {"price": collateral["price"], "decimals": collateral["decimals"]},
+        {"price": debt["price"], "decimals": debt["decimals"]},
+        debt_to_cover,
+    )
+
+    adjusted_collateral = _percent_mul(base_collateral, collateral["liquidation_bonus"])
+
+    if adjusted_collateral > collateral["balance"]:
+        adjusted_collateral = collateral["balance"]
+
+    return (adjusted_collateral * collateral_price_native) // PRICE_ONE
+
+
+def _find_optimal_liquidation_pairs(
+    liquidation_state: Dict[str, Dict], native_price: int
+) -> Dict[str, Dict]:
+    optimal_pairs = {}
+
+    for borrower, state in liquidation_state.items():
+        max_value = 0
+        best_pair = None
+
+        for collateral_addr, debt_addr in product(state["collateral"], state["debt"]):
+            debt_amount = state["debt"][debt_addr]["amount"]
+            debt_to_cover = (
+                debt_amount
+                if state["can_be_max_liquidated"]
+                else (debt_amount * DEFAULT_CLOSE_FACTOR) // MAX_CLOSE_FACTOR
+            )
+
+            value_in_native = _calculate_collateral_value_in_native(
+                collateral_addr, debt_addr, debt_to_cover, state, native_price
+            )
+
+            if value_in_native > max_value:
+                max_value = value_in_native
+                best_pair = {
+                    "collateral": collateral_addr,
+                    "debt": debt_addr,
+                    "value_in_native": value_in_native,
+                    "debt_to_cover": debt_to_cover,
+                }
+
+        if best_pair:
+            optimal_pairs[borrower] = best_pair
+
+    return optimal_pairs
+
+
+def _process_liquidations(context: Context) -> Dict:
+    liquidatable_borrowers = _identify_liquidatable_borrowers(context.state.borrowers)
+    if not liquidatable_borrowers:
+        return {"liquidations_processed": 0}
+
+    all_reserves = list(bot.state.reserve_configs.keys())
+    current_prices = _get_reserve_prices(all_reserves)
+    reserve_prices = dict(zip(all_reserves, current_prices))
+
+    liquidation_state = _build_liquidation_state(
+        liquidatable_borrowers, reserve_prices, bot.state.reserve_configs, context
+    )
+
+    optimal_pairs = _find_optimal_liquidation_pairs(
+        liquidation_state, reserve_prices[NATIVE_ASSET_ADDRESS]
+    )
+
+    # TODO: Next steps would be:
+    # 1. Calculate profitability of each optimal pair
+    # 2. Execute profitable liquidations
+
+    return {
+        "liquidatable_borrowers": len(liquidatable_borrowers),
+        "positions_processed": len(liquidation_state),
+        "optimal_pairs_found": len(optimal_pairs),
+        "liquidations_executed": 0,
+    }
+
+
 @bot.on_startup()
 def bot_startup(startup_state: BotState):
     # Initialize reserve configs
@@ -377,12 +538,19 @@ def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends(
 
 @bot.on_(chain.blocks)
 def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
+    # Update health factors first
     sync_results = _sync_health_factors(context, block.number)
 
+    # Process any liquidations
+    liquidation_results = _process_liquidations(context)
+    click.echo(f"Liquidation results: {liquidation_results}")
+
+    # Update block state
     context.state.block_state["last_processed_block"] = block.number
     _save_block_db(context.state.block_state)
 
     return {
         "block_number": block.number,
         "health_factor_updates": sync_results,
+        "liquidation_results": liquidation_results,
     }

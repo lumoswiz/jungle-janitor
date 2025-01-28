@@ -1,6 +1,7 @@
 import os
 from typing import Annotated, Any, Dict, List, Tuple
 
+import click
 import numpy as np
 import pandas as pd
 from ape import Contract, chain
@@ -15,8 +16,11 @@ bot = SilverbackBot()
 
 # Contracts
 POOL_ADDRESSES_PROVIDER = Contract(os.environ["POOL_ADDRESSES_PROVIDER"])
-POOL = Contract(POOL_ADDRESSES_PROVIDER.getPool())
 UI_POOL_DATA_PROVIDER_V3 = Contract(os.environ["UI_POOL_DATA_PROVIDER_V3"])
+POOL = Contract(POOL_ADDRESSES_PROVIDER.getPool())
+POOL_DATA_PROVIDER = Contract(POOL_ADDRESSES_PROVIDER.getPoolDataProvider())
+AAVE_ORACLE = Contract(POOL_ADDRESSES_PROVIDER.getPriceOracle())
+
 
 # File paths
 BORROWERS_FILEPATH = os.environ.get("BORROWERS_FILEPATH", ".db/borrowers.csv")
@@ -211,6 +215,52 @@ def _parse_user_reserves_data(reserves_data: Any) -> Dict:
     }
 
 
+def _get_all_reserves() -> List[str]:
+    reserves = POOL_DATA_PROVIDER.getAllReservesTokens()
+    return [reserve.tokenAddress for reserve in reserves]
+
+
+def _get_reserve_configurations(reserve_addresses: List[str]) -> List[Tuple[int, int]]:
+    call = multicall.Call()
+
+    for address in reserve_addresses:
+        call.add(POOL_DATA_PROVIDER.getReserveConfigurationData, address)
+
+    results = []
+    for result in call():
+        if result is not None:
+            decimals, _, _, liquidation_bonus, *_ = result
+            results.append((int(decimals), int(liquidation_bonus)))
+
+    return results
+
+
+def _get_reserve_prices(reserve_addresses: List[str]) -> List[int]:
+    return AAVE_ORACLE.getAssetsPrices(reserve_addresses)
+
+
+def _update_reserve_configs() -> Dict[str, Dict]:
+    reserve_addresses = _get_all_reserves()
+
+    configurations = _get_reserve_configurations(reserve_addresses)
+    prices = _get_reserve_prices(reserve_addresses)
+    current_block = chain.blocks.head.number
+
+    reserve_configs = {}
+    for i, address in enumerate(reserve_addresses):
+        decimals, liquidation_bonus = configurations[i]
+        price = prices[i]
+
+        reserve_configs[address] = {
+            "decimals": decimals,
+            "liquidation_bonus": liquidation_bonus,
+            "price": price,
+            "last_update_block": current_block,
+        }
+
+    return reserve_configs
+
+
 def _get_liquidatable_data(borrowers_to_check: List[str], context: Context) -> Dict:
     if not borrowers_to_check:
         return {}
@@ -265,6 +315,9 @@ def _execute_liquidations(context: Context) -> Dict:
 
 @bot.on_startup()
 def bot_startup(startup_state: BotState):
+    # Initialize reserve configs
+    bot.state.reserve_configs = _update_reserve_configs()
+
     # Load blocks
     last_block = _load_block_db()["last_processed_block"]
     current_block = chain.blocks.head.number
@@ -276,11 +329,7 @@ def bot_startup(startup_state: BotState):
     block_state = {"last_processed_block": current_block}
     _save_block_db(block_state)
 
-    return {
-        "message": "Bot started",
-        "start_block": last_block,
-        "end_block": current_block,
-    }
+    return {"message": "Bot started", "start_block": last_block, "end_block": current_block}
 
 
 @bot.on_worker_startup()
@@ -332,6 +381,8 @@ def handle_withdraw(log: ContractLog, context: Annotated[Context, TaskiqDepends(
 
 @bot.on_(chain.blocks)
 def exec_block(block: BlockAPI, context: Annotated[Context, TaskiqDepends()]):
+    click.echo(f"Number of reserves: {len(bot.state.reserve_configs)}")
+
     sync_results = _sync_health_factors(context, block.number)
 
     context.state.block_state["last_processed_block"] = block.number

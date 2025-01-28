@@ -301,9 +301,8 @@ def _get_liquidatable_data(borrowers_to_check: List[str], context: Context) -> D
             health_factor = int(context.state.borrowers[borrower]["health_factor"])
 
             liquidatable_data[borrower] = {
-                "health_factor": health_factor,
-                "collateral_positions": positions["collateral_positions"],
-                "debt_positions": positions["debt_positions"],
+                "collateral": positions["collateral"],
+                "debt": positions["debt"],
                 "can_be_max_liquidated": health_factor < MAX_LIQUIDATION_HF_THRESHOLD,
             }
 

@@ -40,8 +40,8 @@ START_BLOCK = int(os.environ.get("START_BLOCK", chain.blocks.head.number))
 MAX_LIQUIDATION_HF_THRESHOLD = 0.95 * 10**18
 LIQUIDATION_HF_THRESHOLD = 1 * 10**18
 AT_RISK_HF_THRESHOLD = 1.5 * 10**18
-AT_RISK_BLOCK_CHECK = 10
-REGULAR_BLOCK_CHECK = 75
+AT_RISK_BLOCK_CHECK = 480
+REGULAR_BLOCK_CHECK = 3600
 MULTICALL_BATCH_SIZE = 50
 MAX_CLOSE_FACTOR = 10000
 DEFAULT_CLOSE_FACTOR = 5000
@@ -49,6 +49,9 @@ NATIVE_ASSET_ADDRESS = "0xC02AAA39B223FE8D0A0E5C4F27EAD9083C756CC2"
 PRICE_ONE = 100000000
 HALF_BPS = 5000
 BASE_BPS = 10000
+
+# Auto sign
+PROMPT_AUTOSIGN = bot.signer is not None
 
 
 def _load_borrowers_db() -> Dict:
@@ -90,7 +93,7 @@ def _save_block_db(data: Dict):
 def _update_user_data(address, log, context):
     if address in context.state.borrowers:
         *_, health_factor = POOL.getUserAccountData(address)
-        if health_factor == 2**256 - 1:
+        if health_factor == MAX_UINT:
             del context.state.borrowers[address]
         else:
             context.state.borrowers[address].update(
@@ -448,6 +451,49 @@ def _find_optimal_liquidation_pairs(
     return optimal_pairs
 
 
+def _execute_liquidations(optimal_pairs: Dict[str, Dict], context: Context) -> Dict:
+    if not optimal_pairs:
+        return {"liquidations_attempted": 0, "liquidations_executed": 0}
+
+    sorted_pairs = sorted(
+        optimal_pairs.items(), key=lambda x: x[1]["value_in_native"], reverse=True
+    )
+
+    execution_stats = {"liquidations_attempted": len(sorted_pairs), "liquidations_executed": 0}
+
+    if not bot.signer:
+        click.echo(
+            f"Would have executed {len(sorted_pairs)} liquidations "
+            f"(sorted by value: {[p[1]['value_in_native'] for p in sorted_pairs]}) "
+            f"but no signer configured."
+        )
+        return execution_stats
+
+    for borrower, pair in sorted_pairs:
+        try:
+            click.echo(
+                f"Attempting liquidation for borrower {borrower} "
+                f"with value {pair['value_in_native']}"
+            )
+
+            FLASHLOAN_RECEIVER.requestFlashLoan(
+                pair["collateral"],
+                pair["debt"],
+                borrower,
+                pair["debt_to_cover"],
+                sender=bot.signer,
+            )
+
+            execution_stats["liquidations_executed"] += 1
+            click.echo(f"Successfully liquidated position for borrower {borrower}")
+
+        except Exception as e:
+            click.secho(f"Failed to liquidate borrower {borrower}: {str(e)}", fg="red", bold=True)
+            continue
+
+    return execution_stats
+
+
 def _process_liquidations(context: Context) -> Dict:
     liquidatable_borrowers = _identify_liquidatable_borrowers(context.state.borrowers)
     if not liquidatable_borrowers:
@@ -465,19 +511,23 @@ def _process_liquidations(context: Context) -> Dict:
         liquidation_state, reserve_prices[NATIVE_ASSET_ADDRESS]
     )
 
-    # TODO: Next steps would be:
-    # 2. Execute profitable liquidations
+    execution_results = _execute_liquidations(optimal_pairs, context)
 
     return {
         "liquidatable_borrowers": len(liquidatable_borrowers),
         "positions_processed": len(liquidation_state),
         "optimal_pairs_found": len(optimal_pairs),
-        "liquidations_executed": 0,
+        "liquidations_attempted": execution_results["liquidations_attempted"],
+        "liquidations_executed": execution_results["liquidations_executed"],
     }
 
 
 @bot.on_startup()
 def bot_startup(startup_state: BotState):
+    if PROMPT_AUTOSIGN and click.confirm("Enable autosign?"):
+        bot.signer.set_autosign(enabled=True)
+        click.echo(f"Autosign enabled for account: {bot.signer.address}")
+
     # Initialize reserve configs
     bot.state.reserve_configs = _update_reserve_configs()
 

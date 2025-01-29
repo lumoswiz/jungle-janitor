@@ -1,5 +1,7 @@
+import json
 import os
 from itertools import product
+from pathlib import Path
 from typing import Annotated, Any, Dict, List, Tuple
 
 import click
@@ -15,7 +17,12 @@ from taskiq import Context, TaskiqDepends, TaskiqState
 # Initialize bot
 bot = SilverbackBot()
 
+abi_path = Path("./abi/flashloan-receiver.json")
+with open(abi_path) as f:
+    flashloan_receiver_abi = json.load(f)
+
 # Contracts
+FLASHLOAN_RECEIVER = Contract(os.environ["FLASHLOAN_RECEIVER"], abi=flashloan_receiver_abi)
 POOL_ADDRESSES_PROVIDER = Contract(os.environ["POOL_ADDRESSES_PROVIDER"])
 UI_POOL_DATA_PROVIDER_V3 = Contract(os.environ["UI_POOL_DATA_PROVIDER_V3"])
 POOL = Contract(POOL_ADDRESSES_PROVIDER.getPool())
@@ -459,7 +466,6 @@ def _process_liquidations(context: Context) -> Dict:
     )
 
     # TODO: Next steps would be:
-    # 1. Calculate profitability of each optimal pair
     # 2. Execute profitable liquidations
 
     return {

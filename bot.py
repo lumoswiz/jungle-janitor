@@ -171,6 +171,8 @@ def _sync_health_factors(context: Context, current_block: int) -> Dict:
         }
 
     updated_count = 0
+    borrowers_to_remove = []
+
     for i in range(0, len(borrowers_to_check), MULTICALL_BATCH_SIZE):
         batch = borrowers_to_check[i : i + MULTICALL_BATCH_SIZE]
 
@@ -178,27 +180,31 @@ def _sync_health_factors(context: Context, current_block: int) -> Dict:
         for borrower in batch:
             call.add(POOL.getUserAccountData, borrower)
 
-        results = [
-            (borrower, result[-1])
-            for borrower, result in zip(batch, call())
-            if result is not None and result[-1] != MAX_UINT
-        ]
+        for borrower, result in zip(batch, call()):
+            if result is None:
+                continue
 
-        for borrower, health_factor in results:
-            context.state.borrowers[borrower].update(
-                {
-                    "health_factor": str(health_factor),
-                    "last_hf_update": current_block,
-                }
-            )
+            health_factor = result[-1]
+            if health_factor == MAX_UINT:
+                borrowers_to_remove.append(borrower)
+            else:
+                context.state.borrowers[borrower].update(
+                    {
+                        "health_factor": str(health_factor),
+                        "last_hf_update": current_block,
+                    }
+                )
+                updated_count += 1
 
-        updated_count += len(results)
+        for borrower in borrowers_to_remove:
+            del context.state.borrowers[borrower]
 
-        if results:
+        if updated_count > 0 or borrowers_to_remove:
             _save_borrowers_db(context.state.borrowers)
 
     return {
         "updated_count": updated_count,
+        "removed_count": len(borrowers_to_remove),
         "at_risk_checked": len(at_risk_borrowers),
         "safe_checked": len(safe_borrowers),
         "total_checked": len(borrowers_to_check),

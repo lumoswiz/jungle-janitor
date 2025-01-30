@@ -382,45 +382,6 @@ def _percent_div(value: int, bps: int) -> int:
     return (half_bps + value * BASE_BPS) // bps
 
 
-def _calculate_base_collateral(
-    collateral: Dict[str, int], debt: Dict[str, int], debt_to_cover: int
-) -> int:
-    debt_unit = 10 ** debt["decimals"]
-    collateral_unit = 10 ** collateral["decimals"]
-
-    return (debt["price"] * debt_to_cover * collateral_unit) // (collateral["price"] * debt_unit)
-
-
-def _calculate_collateral_value_in_native(
-    collateral_address: str,
-    debt_address: str,
-    debt_to_cover: int,
-    borrower_state: Dict,
-    native_price: int,
-) -> int:
-    collateral = borrower_state["collateral"][collateral_address]
-    debt = borrower_state["debt"][debt_address]
-
-    collateral_price_native = (
-        PRICE_ONE
-        if collateral_address == NATIVE_ASSET_ADDRESS
-        else (collateral["price"] * PRICE_ONE) // native_price
-    )
-
-    base_collateral = _calculate_base_collateral(
-        {"price": collateral["price"], "decimals": collateral["decimals"]},
-        {"price": debt["price"], "decimals": debt["decimals"]},
-        debt_to_cover,
-    )
-
-    adjusted_collateral = _percent_mul(base_collateral, collateral["liquidation_bonus"])
-
-    if adjusted_collateral > collateral["balance"]:
-        adjusted_collateral = collateral["balance"]
-
-    return (adjusted_collateral * collateral_price_native) // PRICE_ONE
-
-
 def _calculate_liquidation_amounts_base(
     borrower_state: Dict[str, Dict], collateral_addr: str, debt_addr: str
 ) -> Tuple[int, int]:
@@ -504,7 +465,7 @@ def _execute_liquidations(optimal_pairs: Dict[str, Dict], context: Context) -> D
         return {"liquidations_attempted": 0, "liquidations_executed": 0}
 
     sorted_pairs = sorted(
-        optimal_pairs.items(), key=lambda x: x[1]["value_in_native"], reverse=True
+        optimal_pairs.items(), key=lambda x: x[1]["collateral_to_liquidate_native"], reverse=True
     )
 
     execution_stats = {"liquidations_attempted": len(sorted_pairs), "liquidations_executed": 0}
@@ -512,7 +473,7 @@ def _execute_liquidations(optimal_pairs: Dict[str, Dict], context: Context) -> D
     if not bot.signer:
         click.echo(
             f"Would have executed {len(sorted_pairs)} liquidations "
-            f"(sorted by value: {[p[1]['value_in_native'] for p in sorted_pairs]}) "
+            f"(sorted by value: {[p[1]['collateral_to_liquidate_native'] for p in sorted_pairs]}) "
             f"but no signer configured."
         )
         return execution_stats
@@ -521,7 +482,7 @@ def _execute_liquidations(optimal_pairs: Dict[str, Dict], context: Context) -> D
         try:
             click.echo(
                 f"Attempting liquidation for borrower {borrower} "
-                f"with value {pair['value_in_native']}"
+                f"with value {pair['collateral_to_liquidate_native']}"
             )
 
             FLASHLOAN_RECEIVER.requestFlashLoan(

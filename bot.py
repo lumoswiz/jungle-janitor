@@ -421,11 +421,14 @@ def _calculate_liquidation_amounts(
     )
 
     collateral_price = borrower_state["collateral"][collateral_addr]["price"]
+    collateral_unit = 10 ** borrower_state["collateral"][collateral_addr]["decimals"]
+    native_unit = 10**18
 
     collateral_to_liquidate_native = (
         collateral_to_liquidate
         if collateral_addr == NATIVE_ASSET_ADDRESS
-        else (collateral_to_liquidate * collateral_price * PRICE_ONE) // native_price
+        else (collateral_to_liquidate * collateral_price * native_unit)
+        // (native_price * collateral_unit)
     )
 
     return collateral_to_liquidate_native, debt_to_cover

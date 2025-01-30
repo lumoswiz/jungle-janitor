@@ -421,6 +421,55 @@ def _calculate_collateral_value_in_native(
     return (adjusted_collateral * collateral_price_native) // PRICE_ONE
 
 
+def _calculate_liquidation_amounts_base(
+    borrower_state: Dict[str, Dict], collateral_addr: str, debt_addr: str
+) -> Tuple[int, int]:
+    collateral = borrower_state["collateral"][collateral_addr]
+    debt = borrower_state["debt"][debt_addr]
+
+    debt_amount = debt["amount"]
+    debt_to_cover = (
+        debt_amount
+        if borrower_state["can_be_max_liquidated"]
+        else (debt_amount * DEFAULT_CLOSE_FACTOR) // MAX_CLOSE_FACTOR
+    )
+
+    collateral_unit = 10 ** collateral["decimals"]
+    debt_unit = 10 ** debt["decimals"]
+
+    base_collateral = (debt["price"] * debt_to_cover * collateral_unit) // (
+        collateral["price"] * debt_unit
+    )
+
+    collateral_to_liquidate = _percent_mul(base_collateral, collateral["liquidation_bonus"])
+
+    if collateral_to_liquidate > collateral["balance"]:
+        collateral_to_liquidate = collateral["balance"]
+        debt_to_cover = (collateral["price"] * collateral_to_liquidate * debt_unit) // _percent_div(
+            debt["price"] * collateral_unit, collateral["liquidation_bonus"]
+        )
+
+    return collateral_to_liquidate, debt_to_cover
+
+
+def _calculate_liquidation_amounts(
+    borrower_state: Dict[str, Dict], collateral_addr: str, debt_addr: str, native_price: int
+) -> Tuple[int, int]:
+    collateral_to_liquidate, debt_to_cover = _calculate_liquidation_amounts_base(
+        borrower_state, collateral_addr, debt_addr
+    )
+
+    collateral_price = borrower_state["collateral"][collateral_addr]["price"]
+
+    collateral_to_liquidate_native = (
+        collateral_to_liquidate
+        if collateral_addr == NATIVE_ASSET_ADDRESS
+        else (collateral_to_liquidate * collateral_price * PRICE_ONE) // native_price
+    )
+
+    return collateral_to_liquidate_native, debt_to_cover
+
+
 def _find_optimal_liquidation_pairs(
     liquidation_state: Dict[str, Dict], native_price: int
 ) -> Dict[str, Dict]:
@@ -431,23 +480,16 @@ def _find_optimal_liquidation_pairs(
         best_pair = None
 
         for collateral_addr, debt_addr in product(state["collateral"], state["debt"]):
-            debt_amount = state["debt"][debt_addr]["amount"]
-            debt_to_cover = (
-                debt_amount
-                if state["can_be_max_liquidated"]
-                else (debt_amount * DEFAULT_CLOSE_FACTOR) // MAX_CLOSE_FACTOR
+            collateral_to_liquidate_native, debt_to_cover = _calculate_liquidation_amounts(
+                state, collateral_addr, debt_addr, native_price
             )
 
-            value_in_native = _calculate_collateral_value_in_native(
-                collateral_addr, debt_addr, debt_to_cover, state, native_price
-            )
-
-            if value_in_native > max_value:
-                max_value = value_in_native
+            if collateral_to_liquidate_native > max_value:
+                max_value = collateral_to_liquidate_native
                 best_pair = {
                     "collateral": collateral_addr,
                     "debt": debt_addr,
-                    "value_in_native": value_in_native,
+                    "collateral_to_liquidate_native": collateral_to_liquidate_native,
                     "debt_to_cover": debt_to_cover,
                 }
 
